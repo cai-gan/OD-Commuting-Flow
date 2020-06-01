@@ -1,0 +1,326 @@
+---
+title: "New_York_OD"
+author: "Guanfang Cai"
+date: "2020/5/15"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(usethis)
+use_git()
+```
+
+```{r Import Data, echo=FALSE}
+getwd()
+setwd("D:/ArcGIS_final_project/ArcGIS/Origin_Dest_Data/New_York_OD")
+pa <- read.csv("./Data/pa_od_aux_JT00_2017.csv") # Pennsylvania 
+nj <- read.csv("./Data/nj_od_aux_JT00_2017.csv") # New Jersey
+ct <- read.csv("./Data/ct_od_aux_JT00_2017.csv") # Conneticut
+ma <- read.csv("./Data/ma_od_aux_JT00_2017.csv") # Massachusetts
+vt <- read.csv("./Data/vt_od_aux_JT00_2017.csv") # Vermont
+ri <- read.csv("./Data/ri_od_aux_JT00_2017.csv") # Rhode Island
+
+ny_main <- read.csv("./Data/ny_od_main_JT00_2017.csv") # New York Interstate
+ny_aux <- read.csv("./Data/ny_od_aux_JT00_2017.csv") # Live in New York work outside state
+ny_main <- as_tibble(ny_main)
+```
+
+```{r Packages}
+library(tidycensus)
+library(tidyverse)
+library(sf)
+library(magrittr)
+library(mapview)
+```
+
+### Clean ny_main (interstate OD data)
+```{r}
+ny_main %<>% mutate_at(c("w_geocode", "h_geocode"), as.character) %>%
+  drop_na(w_geocode, h_geocode) %>%
+  mutate(w_tract = str_sub(w_geocode, 1, 11),
+                    h_tract = str_sub(h_geocode, 1, 11)) %>%
+  select(contains("tract"), everything())
+
+ny_main %<>% group_by(w_tract, h_tract) %>%
+  summarise_at(vars(S000:SI03), sum) %>% 
+  mutate(h_state = str_sub(h_tract, 1, 2),
+         w_state = str_sub(w_tract, 1, 2))
+
+ny_main
+ny_main %>% group_by(w_state) %>% summarize(n())
+
+ny_20 = ny_main %>% filter(S000 >= 20) #too many observation, filter out n <= 20
+ny_20
+```
+
+### get_acs, get census tract geometry
+New York City is composed by 5 counties: New York County (Manhattan), Kings County (Brooklyn),
+Bronx County (The Bronx), Richmond County (Staten Island), and Queens County (Queens)
+```{r}
+ny_tract <- get_acs(geography = "tract", variables = "B01001_001",  year = 2017, state = "NY", geometry = TRUE)
+
+ny_tract
+
+ny_city_tract <- get_acs(geography = "tract", variables = "B01001_001",  year = 2017, state = "NY", county = c("New York", "Kings", "Bronx", "Richmond", "Queens"), geometry = TRUE)
+
+mapview(ny_city_tract, zcol="estimate")
+
+ny_city_sub <- get_acs(geography = "county", variables = "B01001_001",  year = 2017, state = "NY", county = c("New York", "Kings", "Bronx", "Richmond", "Queens"), geometry = TRUE)
+
+mapview(ny_city_sub, zcol="estimate")
+st_write(ny_city_sub, "./map/NewYork_City_Borough.shp")
+```
+
+### Get neighbroing state census tract geometry:
+New York State: 36 NY
+Pennsylvania: 42 PA
+New Jersey: 34 NJ
+Connecticut: 09 CT
+Massachusetts: 25 MA
+Rhode Island: 44 RI
+Vermont: 50 VT
+https://en.wikipedia.org/wiki/Federal_Information_Processing_Standard_state_code
+```{r}
+ny_20 %<>% ungroup()
+pa_tract_id <- ny_20 %>% filter(h_state == 42) %>% select(h_tract)
+pa_tract_id
+  
+pa_tract <- get_acs(geography = "tract", variables = "B01001_001",  year = 2017, state = "PA", geometry = TRUE)
+pa_tract
+
+nj_tract <- get_acs(geography = "tract", variables = "B01001_001",  year = 2017, state = "NJ", geometry = TRUE)
+nj_tract
+
+ct_tract <- get_acs(geography = "tract", variables = "B01001_001",  year = 2017, state = "CT", geometry = TRUE)
+ct_tract
+
+ma_tract <- get_acs(geography = "tract", variables = "B01001_001",  year = 2017, state = "MA", geometry = TRUE)
+ma_tract
+
+ri_tract <- get_acs(geography = "tract", variables = "B01001_001",  year = 2017, state = "RI", geometry = TRUE)
+ri_tract
+
+vt_tract <- get_acs(geography = "tract", variables = "B01001_001",  year = 2017, state = "VT", geometry = TRUE)
+vt_tract
+```
+
+### generate census tract centroid and join longtitude and latitude info to data
+```{r}
+# 整理ny_20, 把非临近的state排除
+#ny_20 %<>% filter(!h_state==25, !h_state==50, !h_state==90, !h_state==42)
+ny_20 %<>% mutate(w_state = str_sub(w_tract, 1, 2),
+                  h_state = str_sub(h_tract, 1, 2))
+
+ny_20 %>% group_by(w_state) %>% summarise(n=n())
+ny_20 %>% group_by(h_state) %>% summarise(n=n())
+ny_20
+
+# 生成New York State tract Centroid =======================================================
+ny_tra_point = st_centroid(ny_tract)
+head(ny_tra_point)
+
+ny_tra_point <- do.call(rbind, ny_tra_point$geometry) %>% 
+    as_tibble() %>% setNames(c("lon","lat")) %>% mutate(GEOID = ny_tra_point$GEOID) %>% select(GEOID, everything())
+ny_tra_point
+
+# 生成 New Jersey tract Centroid ======================================================
+nj_tra_point = st_centroid(nj_tract)
+
+nj_tra_point <- do.call(rbind, nj_tra_point$geometry) %>% 
+    as_tibble() %>% setNames(c("lon","lat")) %>% mutate(GEOID = nj_tra_point$GEOID) %>% select(GEOID, everything())
+nj_tra_point
+
+# Merge data ====================================================================
+ny_20 %<>% left_join(ny_tra_point, by=c("w_tract" = "GEOID")) %>%
+  rename(w_lon=lon, w_lat=lat) %>% 
+  left_join(., ny_tra_point, by=c("h_tract" = "GEOID")) %>%
+  rename(h_lon = lon, h_lat=lat)
+
+#ny_20 %<>% select(-contains("lon"), -contains("lat"))
+ny_20
+str(ny_20)
+View(ny_20)
+sum(is.na(ny_20$h_lon))
+sum(is.na(ny_20$h_lat))
+#(is.na(ny_20$lon.x)&is.na(ny_20$lon.y))
+
+row.has.na <- apply(ny_20, 1, function(x){any(is.na(x))})
+summary(row.has.na)
+ny_20 <- na.omit(ny_20)
+```
+
+```{r Extra Code}
+left_join(., ny_tra_point, by=c("h_tract" = "GEOID")) %>%
+  left_join(., nj_tra_point, by=c("h_tract" = "GEOID")) %>%
+  rename(h_lon = lon, h_lat=lat)
+
+mutate(ifelse(is.na(lon.x), lon.y, lon.x),
+            ifelse(is.na(lat.x), lat.y, lat.x))
+
+list(ny_tra_point, nj_tra_point) %>%
+reduce(left_join, by = c("h_tract" = "GEOID")) %>%
+
+mutate(h_lon = ifelse(h_tract == nj_tra_point$GEOID, nj_tra_point$lon, h_lon),
+         h_lat = ifelse(h_tract == nj_tra_point$GEOID, nj_tra_point$lat, h_lat))
+
+mutate(h_lon = paste(lon.x, lon.y),
+         h_lat = paste(lat.x, lat.y)) 
+#### NA 并不是空无一物，在列表中它就是NA这个字符，所以这个方法也行不通
+
+ny_20[is.na(ny_20)] = ""
+ny_20 %<>%
+  mutate(h_lon = paste(lon.x, lon.y, sep=""),
+         h_lat = paste(lat.x, lat.y, sep=""))
+```
+         
+### Generate OD line for ny_20 (interstate OD data)
+```{r OD line}
+st_segment = function(r){st_linestring(t(matrix(unlist(r), 2, 2)))}
+
+ny_20[, 15:18]
+ny_20_line = st_sfc(sapply(1:nrow(ny_20),
+                              function(i){st_segment(ny_20[i, 15:18])}, 
+                              simplify = FALSE))
+
+ny_20_od = st_sf(ny_20, geometry=ny_20_line)
+class(ny_20_od)
+st_crs(ny_20_od) <- 102716
+ny_20_od["geometry"]
+
+st_write(ny_20_od, "./output/New_York_Interstate_OD.csv", row.names = T,
+         layer_options = "GEOMETRY=AS_WKT")
+```
+
+
+do.call: https://rpubs.com/drquan/lapply_vs_docall
+#### sum(is.na()), colSums(is.na()), rowSums(is.na())
+```{r Generate tract centroid for Massachusetts}
+sum(is.na(ma_tract))
+ma_tract_point = st_centroid(ma_tract)
+ma_tract_point
+ma_tract_point = do.call(rbind, ma_tract_point$geometry) %>% 
+    as_tibble() %>% setNames(c("lon","lat")) %>% mutate(GEOID = ma_tract_point$GEOID) %>% select(GEOID, everything())
+
+ma_tract_point = na.omit(ma_tract_point) #删除缺失值
+sum(is.na(ma_tract_point))
+```
+排除掉geometry有缺失值的observation
+ma_tract_point = ma_tract_point[!st_is_empty(ma_tract_point), ,drop = FALSE]
+
+```{r Generate Tract centroid for Pennsylvania}
+pa_tract
+pa_tra_point = st_centroid(pa_tract)
+pa_tra_point = do.call(rbind, pa_tra_point$geometry) %>%
+  as_tibble() %>% setNames(c("lon", "lat")) %>% 
+  mutate(GEOID= pa_tract$GEOID) %>% select(GEOID, everything())
+
+pa_tra_point = na.omit(pa_tra_point)
+sum(is.na(pa_tra_point))
+pa_tra_point
+```
+
+```{r Generate Tract Centroid for Vermont}
+
+```
+
+
+```{r drop=FALSE 有什么用}
+#drop = FALSE 总的来说就是当返回的数据只有一列时，用drop=F 可以保持数据仍然是
+#dataframe 的形式，而不会直接变成vector. 见下例
+mtcars[, 2, drop=T]
+mtcars[, 2, drop=F]
+```
+
+### New York State Auxiluary OD Data
+### Spatial Reference: https://www.spatialreference.org/ref/?search=new+york+state+plane
+注意，你不一定会在此文件（h_tract)中找到所有的州，比如没找到Connecticut这就代
+表了纽约的居民不在这个州工作
+```{r}
+ny_aux %<>% mutate_at(c("w_geocode", "h_geocode"), as.character) %>%
+  mutate(w_state = str_sub(w_geocode, 1, 2),
+         h_state = str_sub(h_geocode, 1, 2),
+         w_tract = str_sub(w_geocode, 1, 11),
+         h_tract = str_sub(h_geocode, 1, 11)) %>%
+  select(contains("tract"), everything())
+
+ny_aux %>% group_by(w_state) %>% summarise(n()) 
+ny_aux_state = ny_aux %>% group_by(h_state) %>% summarise(n())
+print(ny_aux_state, n = Inf)
+
+ny_aux %<>% group_by(w_tract, h_tract) %>%
+  summarise_at(vars(S000:SI03), sum) %>% 
+  ungroup()
+
+ny_aux_5 <- ny_aux %>% filter(!S000 <= 5) #简化图形，把小于等于5的都剔除
+ny_aux_5
+
+ny_aux_5 %<>% mutate(h_state = str_sub(h_tract, 1, 2),
+                    w_state = str_sub(w_tract, 1, 2)) %>%
+  filter(h_state ==34|h_state ==42|h_state==09|h_state==25|
+           h_state==44|h_state==50)
+
+ny_aux %>% group_by(h_state) %>% summarise(n()) %>% 
+  filter(h_state ==34|h_state ==42|h_state==09|h_state==25|
+           h_state==44|h_state==50)
+
+# Merge Data ========================================================
+ny_aux %<>% left_join(ny_tract, by=("w_tract"="GEOID")) %>%
+  rename(w_lon = lon, w_lat = lat) %>%
+  list(ny_tra_point, nj_tra_point, ) %>%
+reduce(left_join, by = c("h_tract" = "GEOID")) %>%
+  rename(h_lon = lon, h_lat=lat)
+
+
+ny_aux_point = st_centroid(ny_aux)
+```
+New York State: 36 NY
+Pennsylvania: 42 PA
+New Jersey: 34 NJ
+Connecticut: 09 CT
+Massachusetts: 25 MA
+Rhode Island: 44 RI
+Vermont: 50 VT
+
+### Get county shapefile
+```{r}
+ri_county <- get_acs(geography = "county", variables = "B01001_001",  year = 2017, state = "RI", geometry = TRUE)
+
+ma_county <- get_acs(geography = "county", variables = "B01001_001",  year = 2017, state = "MA", geometry = TRUE)
+
+ny_county <- get_acs(geography = "county", variables = "B01001_001",  year = 2017, state = "NY", geometry = TRUE)
+
+nj_county <- get_acs(geography = "county", variables = "B01001_001",  year = 2017, state = "NJ", geometry = TRUE)
+
+ct_county <- get_acs(geography = "county", variables = "B01001_001",  year = 2017, state = "CT", geometry = TRUE)
+
+vt_county <- get_acs(geography = "county", variables = "B01001_001",  year = 2017, state = "VT", geometry = TRUE)
+
+ri_county
+ma_county
+ny_county
+nj_county
+ct_county
+vt_county
+
+st_crs(ri_county)
+st_crs(ma_county)
+
+st_write(ri_county, "./map/Rhode_Island_county.shp")
+st_write(ny_county, "./map/New_York_State_County.shp")
+st_write(ma_county, "./map/Massachusetts_County.shp")
+st_write(vt_county, "./map/Vermont_County.shp")
+st_write(ct_county, "./map/Connecticut_County.shp")
+```
+
+
+
+
+
+
+
+
+
+
